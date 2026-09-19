@@ -229,32 +229,6 @@ are all calculated from this **hybrid probability distribution**.
 
 ---
 
-## Why use a hybrid?
-
-The models showed different strengths on independently collected images.
-
-On a 60-image external development benchmark:
-
-| Model | Accuracy | Macro F1 |
-|---|---:|---:|
-| v3 | 38.33% | 0.4180 |
-| v5 | 45.00% | 0.5188 |
-| v3 + v5 hybrid | **56.67%** | **0.6093** |
-
-A second separate benchmark was also evaluated after the routing rules had been frozen:
-
-| Model | Accuracy | Macro F1 |
-|---|---:|---:|
-| v3 | 50.00% | 0.4995 |
-| v5 | 47.06% | 0.5314 |
-| v3 + v5 hybrid | **52.94%** | **0.5430** |
-
-The first benchmark was used during development of the routing strategy, so it should not be interpreted as an unbiased final test set. The second benchmark provides a smaller independent check of the frozen hybrid.
-
-These results also demonstrate that strong performance on conventional dataset splits does not necessarily translate directly to uncontrolled real-world photography.
-
----
-
 # 🌱 Supported Classes
 
 FoliAI currently predicts the following 15 classes.
