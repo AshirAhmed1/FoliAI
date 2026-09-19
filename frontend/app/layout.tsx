@@ -14,7 +14,8 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "FoliAI — Plant Disease Classifier",
-  description: "Upload a leaf image to classify plant disease.",
+  description:
+    "Upload a leaf photo to identify one of 15 healthy or disease classes across bell pepper, potato, and tomato.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
