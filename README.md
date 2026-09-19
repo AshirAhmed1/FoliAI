@@ -25,24 +25,38 @@ A plant disease classifier: upload a photo of a leaf, get back the most likely d
 
 ## How it works
 
+### Two-stage inference
+
+1. **Plant / leaf scope gate** (OpenCLIP ViT-B-32) — a semantic input gate that rejects *obvious* non-plant images (people, cars, furniture, etc.) before disease classification. It compares the image against plant/leaf and non-plant text concepts; uncertain cases are allowed through. False rejection of real leaves is treated as worse than a later low-confidence disease result. First startup downloads OpenAI CLIP weights (~338MB) into the local Hugging Face cache.
+2. **v3 + v5 class-specific hybrid** — two ResNet-18 disease models whose class probabilities are combined with frozen routing, temperature scaling (T = 2.5), and a 60% confidence gate.
+
+FoliAI can therefore distinguish:
+
+- **Non-plant / out of scope** — no disease top-3 shown
+- **Plant-like, low disease confidence** — closest disease matches shown
+- **Likely disease / healthy match** — top prediction + top-3
+
+The plant detector is probabilistic and not perfect.
+
 ### Backend (`main.py`, FastAPI)
 
-- ResNet-18 backbone with a replaced final layer for the 15-class head, loaded from a local checkpoint (`model/best_model.pth`)
-- **Temperature-scaled softmax** (T = 2.5) before the confidence threshold — cross-entropy-trained nets are often overconfident on out-of-distribution inputs (a blank desk, a solid color), so softening the distribution before gating on 60% helps catch those cases instead of confidently misclassifying them
-- **Input validation**: images are decoded and re-verified as real image data (not just trusted by file extension or `Content-Type` header), uploads are capped at 10MB, and unhandled errors return a generic message instead of leaking a Python traceback
-- **CORS** locked to the frontend's origin, not a wildcard
+- ResNet-18 v3 + v5 hybrid (`model/best_model.pth`, `model/best_model_v5.pth`)
+- OpenCLIP plant/leaf gate loaded once at startup (weights cached by Hugging Face / open_clip after first download)
+- **Temperature-scaled softmax** (T = 2.5) and **60% disease confidence threshold**
+- **Input validation**: PIL decode, 10MB cap, generic error messages
+- **CORS** locked to the frontend origin
 
 ### Frontend (`frontend/`, Next.js + React)
 
-- Drag-and-drop or click-to-upload, with keyboard accessibility
-- Client-side image resize (longest side capped at 800px, re-encoded as JPEG) before upload, to keep requests small and fast
-- Displays the top-3 predictions with confidence bars, and a distinct "no clear match" state when the model isn't confident
+- Upload, local camera, and drag-and-drop
+- Three result states: likely match, no clear match (plant), not a supported leaf image
+- Client-side resize before upload
 
 ## Tech stack
 
 | Layer | Tools |
 |---|---|
-| ML | PyTorch, torchvision (ResNet-18) |
+| ML | PyTorch, torchvision (ResNet-18), OpenCLIP (ViT-B-32 plant gate) |
 | Backend | FastAPI, Pillow, python-multipart |
 | Frontend | Next.js, React, TypeScript, Tailwind CSS |
 
@@ -84,6 +98,8 @@ Multipart form upload with a `file` field (JPEG, PNG, WebP, or GIF, max 10MB).
   "class_name": "Tomato_Late_blight",
   "confidence": 0.87,
   "matched": true,
+  "input_valid": true,
+  "reason": null,
   "message": null,
   "predictions": [
     { "class_name": "Tomato_Late_blight", "confidence": 0.87 },
@@ -93,12 +109,32 @@ Multipart form upload with a `file` field (JPEG, PNG, WebP, or GIF, max 10MB).
 }
 ```
 
-### `GET /health`
-
-Reports whether the model is loaded.
+Non-plant / out-of-scope example:
 
 ```json
-{ "status": "ok", "model_loaded": true }
+{
+  "class_name": null,
+  "confidence": null,
+  "matched": false,
+  "input_valid": false,
+  "reason": "non_plant",
+  "message": "This image does not appear to contain a supported plant leaf. ...",
+  "predictions": []
+}
+```
+
+### `GET /health`
+
+Reports whether the plant gate and disease models are loaded.
+
+```json
+{
+  "status": "ok",
+  "plant_gate_loaded": true,
+  "v3_loaded": true,
+  "v5_loaded": true,
+  "ensemble": "v3+v5_hybrid"
+}
 ```
 
 ## Supported classes
