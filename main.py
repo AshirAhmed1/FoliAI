@@ -81,6 +81,16 @@ app.add_middleware(
 device: torch.device = torch.device("cpu")
 model_v3: Optional[nn.Module] = None
 model_v5: Optional[nn.Module] = None
+plant_gate: Optional[Any] = None
+
+LOW_CONFIDENCE_MESSAGE = (
+    "FoliAI detected a plant-like image, but couldn't confidently match it "
+    "to one of the 15 supported classes."
+)
+NON_PLANT_MESSAGE = (
+    "This image does not appear to contain a supported plant leaf. "
+    "Try uploading a clear photo of a bell pepper, potato, or tomato leaf."
+)
 
 
 def _unwrap_state_dict(raw: Any) -> dict:
@@ -246,12 +256,16 @@ def run_hybrid_inference(tensor: torch.Tensor) -> torch.Tensor:
 
 @app.on_event("startup")
 def startup() -> None:
-    global device, model_v3, model_v5
+    global device, model_v3, model_v5, plant_gate
+    from plant_gate import PlantLeafGate
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Load plant/leaf semantic gate first, then disease ensemble models.
+    plant_gate = PlantLeafGate(device)
     model_v3 = load_model(V3_MODEL_PATH, "v3")
     model_v5 = load_model(V5_MODEL_PATH, "v5")
     logger.info(
-        "Hybrid ensemble ready (v3+v5 class-specific routing, T=%.1f, device=%s)",
+        "Ready: plant gate + v3+v5 hybrid (T=%.1f, device=%s)",
         SOFTMAX_TEMPERATURE,
         device,
     )
@@ -277,6 +291,9 @@ def health():
     return {
         "status": "ok",
         "model_loaded": model_v3 is not None and model_v5 is not None,
+        "plant_gate_loaded": plant_gate is not None,
+        "v3_loaded": model_v3 is not None,
+        "v5_loaded": model_v5 is not None,
         "ensemble": "v3+v5_hybrid",
         "device": str(device),
         "model_v3_training": bool(model_v3.training) if model_v3 is not None else None,
@@ -298,7 +315,7 @@ def _top_predictions(probabilities: torch.Tensor, k: int = TOP_K) -> list[dict]:
 
 @app.post("/predict")
 async def predict(request: Request, file: UploadFile = File(...)):
-    if model_v3 is None or model_v5 is None:
+    if model_v3 is None or model_v5 is None or plant_gate is None:
         raise HTTPException(status_code=503, detail="Model is not loaded")
 
     content_length = request.headers.get("content-length")
@@ -331,7 +348,40 @@ async def predict(request: Request, file: UploadFile = File(...)):
         except OSError:
             raise HTTPException(status_code=400, detail=GENERIC_INVALID_IMAGE)
 
-        # Preprocess once; reuse the same tensor for v3 and v5.
+        # --- Stage 1: semantic plant/leaf gate (CLIP) ---
+        # Reject only on strong non-plant evidence. Uncertain images pass through.
+        try:
+            gate = plant_gate.classify(image)
+        except Exception as gate_exc:
+            logger.exception("Plant gate failed: %s", gate_exc)
+            raise HTTPException(status_code=500, detail=GENERIC_INFERENCE_ERROR)
+
+        if gate.decision == "non_plant":
+            logger.info(
+                "Rejected before disease ensemble: non-plant "
+                "(plant=%.3f non_plant=%.3f)",
+                gate.plant_score,
+                gate.non_plant_score,
+            )
+            return {
+                "class_name": None,
+                "confidence": None,
+                "matched": False,
+                "input_valid": False,
+                "reason": "non_plant",
+                "message": NON_PLANT_MESSAGE,
+                "predictions": [],
+            }
+
+        logger.debug(
+            "Plant gate passed (decision=%s plant=%.3f non_plant=%.3f); "
+            "running v3+v5 hybrid",
+            gate.decision,
+            gate.plant_score,
+            gate.non_plant_score,
+        )
+
+        # --- Stage 2: existing v3+v5 disease ensemble (unchanged) ---
         tensor = preprocess(image).unsqueeze(0).to(device)
 
         logger.debug(
@@ -342,14 +392,12 @@ async def predict(request: Request, file: UploadFile = File(...)):
             tensor.mean().item(),
         )
 
-        # Hybrid probabilities: temperature once per model, then class routing.
         hybrid_probs = run_hybrid_inference(tensor)[0]
 
         if not torch.isfinite(hybrid_probs).all():
             logger.error("Non-finite values in hybrid probability vector")
             raise HTTPException(status_code=500, detail=GENERIC_INFERENCE_ERROR)
 
-        # Prediction / confidence / top-3 / rejection all use HYBRID probs only.
         predictions = _top_predictions(hybrid_probs, TOP_K)
         confidence = predictions[0]["confidence"]
         class_name = predictions[0]["class_name"]
@@ -366,7 +414,9 @@ async def predict(request: Request, file: UploadFile = File(...)):
             "class_name": class_name if matched else None,
             "confidence": confidence,
             "matched": matched,
-            "message": None if matched else UNKNOWN_MESSAGE,
+            "input_valid": True,
+            "reason": None if matched else "low_confidence",
+            "message": None if matched else LOW_CONFIDENCE_MESSAGE,
             "predictions": predictions,
         }
 

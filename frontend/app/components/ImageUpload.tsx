@@ -7,10 +7,14 @@ type PredictionItem = {
   confidence: number;
 };
 
+type PredictionReason = "non_plant" | "low_confidence" | null;
+
 type Prediction = {
   class_name: string | null;
-  confidence: number;
+  confidence: number | null;
   matched: boolean;
+  input_valid: boolean;
+  reason: PredictionReason;
   message: string | null;
   predictions: PredictionItem[];
 };
@@ -78,12 +82,25 @@ async function resizeImageForUpload(file: File): Promise<File> {
 function isPredictionPayload(payload: unknown): payload is Prediction {
   if (!payload || typeof payload !== "object") return false;
   const p = payload as Prediction;
-  if (typeof p.confidence !== "number" || typeof p.matched !== "boolean") {
+  if (typeof p.matched !== "boolean") return false;
+  if (typeof p.input_valid !== "boolean") return false;
+  if (
+    !(
+      p.reason === null ||
+      p.reason === "non_plant" ||
+      p.reason === "low_confidence"
+    )
+  ) {
     return false;
   }
   if (!(p.class_name === null || typeof p.class_name === "string")) return false;
+  if (!(p.confidence === null || typeof p.confidence === "number")) return false;
   if (!(p.message === null || typeof p.message === "string")) return false;
-  if (!Array.isArray(p.predictions) || p.predictions.length === 0) return false;
+  if (!Array.isArray(p.predictions)) return false;
+  if (p.reason === "non_plant") {
+    return p.predictions.length === 0;
+  }
+  if (p.predictions.length === 0) return false;
   return p.predictions.every(
     (item) =>
       item &&
@@ -523,7 +540,7 @@ export default function ImageUpload() {
   );
 
   const topConfidencePct =
-    prediction != null
+    prediction != null && typeof prediction.confidence === "number"
       ? Math.max(0, Math.min(100, prediction.confidence * 100))
       : 0;
 
@@ -825,43 +842,75 @@ export default function ImageUpload() {
         </div>
       )}
 
-      {prediction && !isLoading && !prediction.matched && (
-        <div
-          className="rounded-2xl border border-amber-200 bg-amber-50/80 px-5 py-5 shadow-sm"
-          aria-live="polite"
-        >
-          <p className="text-xs font-semibold uppercase tracking-wide text-amber-800">
-            No clear match
-          </p>
-          <p className="mt-2 text-base font-medium leading-relaxed text-zinc-900">
-            FoliAI couldn&apos;t confidently match this image to one of its
-            supported classes.
-          </p>
-          <p className="mt-2 text-sm text-zinc-600">
-            FoliAI returns a match only when confidence reaches the configured
-            threshold.
-          </p>
-
-          <p className="mt-5 text-xs font-semibold uppercase tracking-wide text-amber-800/80">
-            Closest matches
-          </p>
-          <div className="mt-3">
-            <ConfidenceList
-              items={prediction.predictions}
-              accent="amber"
-              ariaLabel="Closest matches"
-            />
-          </div>
-
-          <button
-            type="button"
-            onClick={resetUpload}
-            className="mt-5 inline-flex min-h-11 w-full items-center justify-center rounded-xl border border-amber-300 bg-white px-4 py-2.5 text-sm font-medium text-zinc-800 transition-colors hover:bg-amber-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-600"
+      {prediction &&
+        !isLoading &&
+        !prediction.matched &&
+        prediction.reason === "non_plant" && (
+          <div
+            className="rounded-2xl border border-slate-200 bg-slate-50 px-5 py-5 shadow-sm"
+            aria-live="polite"
           >
-            Upload another image
-          </button>
-        </div>
-      )}
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">
+              Not a supported leaf image
+            </p>
+            <p className="mt-2 text-base font-medium leading-relaxed text-zinc-900">
+              {prediction.message ??
+                "This image does not appear to contain a supported plant leaf."}
+            </p>
+            <p className="mt-2 text-sm text-zinc-600">
+              FoliAI currently analyzes leaf images from bell pepper, potato, and
+              tomato plants.
+            </p>
+            <button
+              type="button"
+              onClick={resetUpload}
+              className="mt-5 inline-flex min-h-11 w-full items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-zinc-800 transition-colors hover:bg-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-500"
+            >
+              Try another image
+            </button>
+          </div>
+        )}
+
+      {prediction &&
+        !isLoading &&
+        !prediction.matched &&
+        prediction.reason === "low_confidence" && (
+          <div
+            className="rounded-2xl border border-amber-200 bg-amber-50/80 px-5 py-5 shadow-sm"
+            aria-live="polite"
+          >
+            <p className="text-xs font-semibold uppercase tracking-wide text-amber-800">
+              No clear match
+            </p>
+            <p className="mt-2 text-base font-medium leading-relaxed text-zinc-900">
+              {prediction.message ??
+                "FoliAI detected a plant-like image, but couldn't confidently match it to one of the 15 supported classes."}
+            </p>
+            <p className="mt-2 text-sm text-zinc-600">
+              FoliAI returns a match only when confidence reaches the configured
+              threshold.
+            </p>
+
+            <p className="mt-5 text-xs font-semibold uppercase tracking-wide text-amber-800/80">
+              Closest matches
+            </p>
+            <div className="mt-3">
+              <ConfidenceList
+                items={prediction.predictions}
+                accent="amber"
+                ariaLabel="Closest matches"
+              />
+            </div>
+
+            <button
+              type="button"
+              onClick={resetUpload}
+              className="mt-5 inline-flex min-h-11 w-full items-center justify-center rounded-xl border border-amber-300 bg-white px-4 py-2.5 text-sm font-medium text-zinc-800 transition-colors hover:bg-amber-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-600"
+            >
+              Upload another image
+            </button>
+          </div>
+        )}
 
       {error && !isLoading && !prediction && (
         <button
