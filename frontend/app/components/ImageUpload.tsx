@@ -389,7 +389,7 @@ export default function ImageUpload() {
       return;
     }
 
-    if (navigator.mediaDevices?.getUserMedia) {
+    if (typeof navigator.mediaDevices?.getUserMedia === "function") {
       setError(null);
       setIsWebcamOpen(true);
       return;
