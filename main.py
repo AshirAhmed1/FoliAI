@@ -39,6 +39,13 @@ MODEL_DIR = Path(__file__).parent / "model"
 V3_MODEL_PATH = MODEL_DIR / "best_model.pth"
 V5_MODEL_PATH = MODEL_DIR / "best_model_v5.pth"
 
+ENABLE_PLANT_GATE = os.getenv("ENABLE_PLANT_GATE", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
 CONFIDENCE_THRESHOLD = 0.60
 # Temperature is applied once per model (to logits) before hybrid routing.
 # Do not apply T again to the hybrid vector.
@@ -267,18 +274,31 @@ def run_hybrid_inference(tensor: torch.Tensor) -> torch.Tensor:
 @app.on_event("startup")
 def startup() -> None:
     global device, model_v3, model_v5, plant_gate
-    from plant_gate import PlantLeafGate
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # Load plant/leaf semantic gate first, then disease ensemble models.
-    plant_gate = PlantLeafGate(device)
+    if ENABLE_PLANT_GATE:
+        from plant_gate import PlantLeafGate
+
+        # Load plant/leaf semantic gate first, then disease ensemble models.
+        plant_gate = PlantLeafGate(device)
+    else:
+        plant_gate = None
+        logger.info("Plant gate disabled (ENABLE_PLANT_GATE=false)")
+
     model_v3 = load_model(V3_MODEL_PATH, "v3")
     model_v5 = load_model(V5_MODEL_PATH, "v5")
-    logger.info(
-        "Ready: plant gate + v3+v5 hybrid (T=%.1f, device=%s)",
-        SOFTMAX_TEMPERATURE,
-        device,
-    )
+    if ENABLE_PLANT_GATE:
+        logger.info(
+            "Ready: plant gate + v3+v5 hybrid (T=%.1f, device=%s)",
+            SOFTMAX_TEMPERATURE,
+            device,
+        )
+    else:
+        logger.info(
+            "Ready: v3+v5 hybrid (T=%.1f, device=%s)",
+            SOFTMAX_TEMPERATURE,
+            device,
+        )
 
 
 @app.exception_handler(Exception)
@@ -301,6 +321,7 @@ def health():
     return {
         "status": "ok",
         "model_loaded": model_v3 is not None and model_v5 is not None,
+        "plant_gate_enabled": ENABLE_PLANT_GATE,
         "plant_gate_loaded": plant_gate is not None,
         "v3_loaded": model_v3 is not None,
         "v5_loaded": model_v5 is not None,
@@ -325,7 +346,11 @@ def _top_predictions(probabilities: torch.Tensor, k: int = TOP_K) -> list[dict]:
 
 @app.post("/predict")
 async def predict(request: Request, file: UploadFile = File(...)):
-    if model_v3 is None or model_v5 is None or plant_gate is None:
+    if (
+        model_v3 is None
+        or model_v5 is None
+        or (ENABLE_PLANT_GATE and plant_gate is None)
+    ):
         raise HTTPException(status_code=503, detail="Model is not loaded")
 
     content_length = request.headers.get("content-length")
@@ -360,36 +385,37 @@ async def predict(request: Request, file: UploadFile = File(...)):
 
         # --- Stage 1: semantic plant/leaf gate (CLIP) ---
         # Reject only on strong non-plant evidence. Uncertain images pass through.
-        try:
-            gate = plant_gate.classify(image)
-        except Exception as gate_exc:
-            logger.exception("Plant gate failed: %s", gate_exc)
-            raise HTTPException(status_code=500, detail=GENERIC_INFERENCE_ERROR)
+        if ENABLE_PLANT_GATE and plant_gate is not None:
+            try:
+                gate = plant_gate.classify(image)
+            except Exception as gate_exc:
+                logger.exception("Plant gate failed: %s", gate_exc)
+                raise HTTPException(status_code=500, detail=GENERIC_INFERENCE_ERROR)
 
-        if gate.decision == "non_plant":
-            logger.info(
-                "Rejected before disease ensemble: non-plant "
-                "(plant=%.3f non_plant=%.3f)",
+            if gate.decision == "non_plant":
+                logger.info(
+                    "Rejected before disease ensemble: non-plant "
+                    "(plant=%.3f non_plant=%.3f)",
+                    gate.plant_score,
+                    gate.non_plant_score,
+                )
+                return {
+                    "class_name": None,
+                    "confidence": None,
+                    "matched": False,
+                    "input_valid": False,
+                    "reason": "non_plant",
+                    "message": NON_PLANT_MESSAGE,
+                    "predictions": [],
+                }
+
+            logger.debug(
+                "Plant gate passed (decision=%s plant=%.3f non_plant=%.3f); "
+                "running v3+v5 hybrid",
+                gate.decision,
                 gate.plant_score,
                 gate.non_plant_score,
             )
-            return {
-                "class_name": None,
-                "confidence": None,
-                "matched": False,
-                "input_valid": False,
-                "reason": "non_plant",
-                "message": NON_PLANT_MESSAGE,
-                "predictions": [],
-            }
-
-        logger.debug(
-            "Plant gate passed (decision=%s plant=%.3f non_plant=%.3f); "
-            "running v3+v5 hybrid",
-            gate.decision,
-            gate.plant_score,
-            gate.non_plant_score,
-        )
 
         # --- Stage 2: existing v3+v5 disease ensemble (unchanged) ---
         tensor = preprocess(image).unsqueeze(0).to(device)
