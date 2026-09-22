@@ -1,0 +1,12 @@
+.git
+.next
+frontend
+data
+__pycache__
+*.pyc
+*.pyo
+model/best_model_v1_backup.pth
+model/best_model_v2_backup.pth
+train_robust_v1.py
+_verify_*.py
+_http_*.py
